@@ -4,9 +4,9 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
-from matplotlib.ticker import MultipleLocator
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QPushButton, QComboBox, QFileDialog, QMessageBox
+    QWidget, QVBoxLayout, QLabel, QPushButton, QComboBox,
+    QFileDialog, QMessageBox
 )
 from PyQt5.QtCore import Qt
 
@@ -25,6 +25,7 @@ class ResultTab(QWidget):
         self.info_label = QLabel("Analyse générale des résultats")
         layout.addWidget(self.info_label)
 
+        # Choix du dossier de sauvegarde
         self.btn_select_save = QPushButton("Sélectionner dossier de sauvegarde")
         self.btn_select_save.clicked.connect(self.select_save_folder)
         layout.addWidget(self.btn_select_save)
@@ -32,12 +33,13 @@ class ResultTab(QWidget):
         self.save_folder_label = QLabel("Aucun dossier sélectionné")
         layout.addWidget(self.save_folder_label)
 
+        # Type de graphique
         self.chart_type_combo = QComboBox()
-        # Ici nous proposons deux types de graphique
         self.chart_type_combo.addItem("Graphique linéaire par station")
         self.chart_type_combo.addItem("Graphique en barres par station")
         layout.addWidget(self.chart_type_combo)
 
+        # Bouton de génération
         self.btn_generate = QPushButton("Générer graphiques")
         self.btn_generate.clicked.connect(self.generate_charts)
         layout.addWidget(self.btn_generate)
@@ -45,16 +47,19 @@ class ResultTab(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
-    def set_excel_file(self, excel_file):
+    def set_excel_file(self, excel_file: str):
         self.excel_file = excel_file
 
     def select_save_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Sélectionner le dossier de sauvegarde")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Sélectionner le dossier de sauvegarde"
+        )
         if folder:
             self.save_folder = folder
             self.save_folder_label.setText(folder)
 
     def generate_charts(self):
+        # Vérifications initiales
         if not self.excel_file:
             QMessageBox.warning(self, "Attention", "Aucun fichier Excel chargé.")
             return
@@ -64,121 +69,151 @@ class ResultTab(QWidget):
 
         chart_type = self.chart_type_combo.currentText()
 
-        # Chemin des logos (dossier "logo" à la racine)
+        # 1) Lecture de la feuille "Résumé" pour récupérer Z_CC49
+        try:
+            summary = pd.read_excel(
+                self.excel_file,
+                sheet_name="Résumé",
+                usecols=["Station", "Z_CC49"]
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Erreur", f"Impossible de lire la feuille 'Résumé' :\n{e}")
+            return
+
+        summary["Station"] = summary["Station"].astype(str).str.strip().str.upper()
+
+        # 2) Préparation des chemins de logos
         logo_folder = os.path.join(os.getcwd(), "logo")
-        logo_altiplage_path = os.path.join(logo_folder, "logo_Altiplage.png")
-        lamanche_logo_path = os.path.join(logo_folder, "lamanche.jpg")
-        cnam_logo_path = os.path.join(logo_folder, "cnam.png")
+        logo_paths = {
+            "altiplage": os.path.join(logo_folder, "Altipl5.png"),
+            "lamanche":  os.path.join(logo_folder, "lamanche.jpg"),
+            "cnam":      os.path.join(logo_folder, "cnam.png")
+        }
 
-        # Lire l'Excel pour obtenir les sites (feuilles sauf "Résumé")
+        # 3) Parcours des feuilles (hors "Résumé")
         xls = pd.ExcelFile(self.excel_file)
-        sheet_names = [s for s in xls.sheet_names if s != "Résumé"]
-
+        sheets = [s for s in xls.sheet_names if s != "Résumé"]
         saved_files = []
 
-        for site in sheet_names:
+        for site in sheets:
             try:
                 df = pd.read_excel(self.excel_file, sheet_name=site)
-                # Conversion des dates avec format explicite
+
+                # Conversion de la date
                 if "Date / Heure" in df.columns:
                     df["Date / Heure"] = pd.to_datetime(
-                        df["Date / Heure"], format="%d/%m/%Y %Hh%Mm%S", errors="coerce", dayfirst=True)
+                        df["Date / Heure"],
+                        format="%d/%m/%Y %Hh%Mm%S",
+                        dayfirst=True,
+                        errors="coerce"
+                    )
+
+                # Conversion du résultat en numérique (cm)
                 if "Résultat" in df.columns:
                     df["Résultat"] = pd.to_numeric(df["Résultat"], errors="coerce")
 
-                # Création d'une nouvelle figure pour chaque site
+                # Récupération de Z_CC49
+                code = site.strip().upper()
+                row = summary.loc[summary["Station"] == code, "Z_CC49"]
+                if not row.empty and pd.notna(row.iloc[0]):
+                    z_ref = float(row.iloc[0])
+                    df["Hauteur sable (m)"] = z_ref - df["Résultat"] / 100.0
+                    plot_col = "Hauteur sable (m)"
+                    y_label = "Hauteur sable (m)"
+                    has_ref = True
+                else:
+                    plot_col = "Résultat"
+                    y_label = "Résultat (cm)"
+                    has_ref = False
+                    z_ref = None
+
+                # Tri par date si possible
+                if "Date / Heure" in df.columns:
+                    try:
+                        df = df.sort_values("Date / Heure")
+                    except Exception:
+                        pass
+
+                # --- Création du graphique ---
                 fig, ax = plt.subplots(figsize=(10, 6))
+                ax.set_title(f"Évolution sédimentaire – Site : {site}",
+                             pad=15, fontweight="bold")
 
-                if chart_type == "Graphique linéaire par station":
-                    if "Date / Heure" in df.columns and "Résultat" in df.columns:
-                        df = df.sort_values("Date / Heure")
-                        ax.plot(df["Date / Heure"], df["Résultat"], marker="o", color='blue', linestyle='-')
-                        ax.set_xlabel("Date")
-                        ax.set_ylabel("Résultat (cm)")
-                        ax.tick_params(axis='x', rotation=45)
-                    ax.set_title(f"Evolution sédimentaire: - Site : {site}")
+                if "Date / Heure" in df.columns and plot_col in df.columns:
+                    # Tracé des points
+                    if "linéaire" in chart_type.lower():
+                        ax.scatter(df["Date / Heure"], df[plot_col],
+                                   s=50, zorder=3)
+                        # droite de tendance entre premier et dernier
+                        if len(df) >= 2:
+                            x0, y0 = df["Date / Heure"].iloc[0], df[plot_col].iloc[0]
+                            x1, y1 = df["Date / Heure"].iloc[-1], df[plot_col].iloc[-1]
+                            ax.plot([x0, x1], [y0, y1],
+                                    linestyle="--", linewidth=1.5,
+                                    color="orange", label="Tendance extrêmes",
+                                    zorder=2)
+                        ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.6), frameon=False)
 
-                elif chart_type == "Graphique en barres par station":
-                    if "Date / Heure" in df.columns and "Résultat" in df.columns:
-                        df = df.sort_values("Date / Heure")
-                        dates_str = df["Date / Heure"].dt.strftime("%d/%m/%Y")
-                        ax.bar(dates_str, df["Résultat"], color='blue')
-                        ax.set_xlabel("Date")
-                        ax.set_ylabel("Résultat (cm)")
-                        ax.tick_params(axis='x', rotation=45)
-                    ax.set_title(f"Evolution sédimentaire: - Site : {site}")
-                else:
-                    QMessageBox.warning(self, "Attention", "Type de graphique non reconnu.")
-                    continue
+                    else:
+                        dates = df["Date / Heure"].dt.strftime("%d/%m/%Y")
+                        ax.bar(dates, df[plot_col],
+                               alpha=0.7, zorder=2)
 
-                # Définition des limites de l'axe y : min - 10 et max + 10, avec un pas de 2 cm
-                if not df["Résultat"].empty:
-                    min_val = df["Résultat"].min()
-                    max_val = df["Résultat"].max()
-                else:
-                    min_val, max_val = 0, 0
-                ax.set_ylim(min_val - 10, max_val + 10)
-                ax.yaxis.set_major_locator(MultipleLocator(2))
-                ax.yaxis.grid(True, linestyle='--', alpha=0.7)
+                    ax.set_xlabel("Date")
+                    ax.set_ylabel(y_label)
+                    ax.tick_params(axis="x", rotation=45)
 
-                fig.subplots_adjust(top=0.80)
-                fig.text(0.5, 0.99, f"Evolution sédimentaire: - Site : {site}",
-                         ha='center', va='center', fontsize=16, fontweight='bold', color='blue')
+                    # grille légère
+                    ax.grid(which="major", linestyle=":", alpha=0.5)
 
-                # Ajout des logos
-                ax_logo_left = fig.add_axes([0.02, 0.98, 0.10, 0.20], zorder=10)
-                try:
-                    logo_altiplage = mpimg.imread(logo_altiplage_path)
-                    ax_logo_left.imshow(logo_altiplage)
-                except Exception as e:
-                    print(f"Erreur lors du chargement du logo Altiplage : {e}")
-                ax_logo_left.axis('off')
+                    # axe Y de 0 à Z_CC49+1 si dispo
+                    if has_ref:
+                        ax.set_ylim(0, z_ref + 1)
+                    else:
+                        ax.set_ylim(bottom=0)
 
-                ax_logo_top_right1 = fig.add_axes([0.78, 0.98, 0.10, 0.20], zorder=10)
-                try:
-                    logo_lamanche = mpimg.imread(lamanche_logo_path)
-                    ax_logo_top_right1.imshow(logo_lamanche)
-                except Exception as e:
-                    print(f"Erreur lors du chargement du logo lamanche : {e}")
-                ax_logo_top_right1.axis('off')
+                    # ligne de référence et légende à droite
+                    if has_ref:
+                        ax.axhline(
+                            y=z_ref,
+                            linestyle="--",
+                            label="Hauteur poteau réf. CC49",
+                            color="C1"
+                        )
+                        ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
 
-                ax_logo_top_right2 = fig.add_axes([0.90, 0.98, 0.10, 0.20], zorder=10)
-                try:
-                    logo_cnam = mpimg.imread(cnam_logo_path)
-                    ax_logo_top_right2.imshow(logo_cnam)
-                except Exception as e:
-                    print(f"Erreur lors du chargement du logo cnam : {e}")
-                ax_logo_top_right2.axis('off')
+                # --- Ajout des logos ---
+                for pos, path in zip(
+                    [(0.02, 0.92, 0.10, 0.08),
+                     (0.78, 0.92, 0.10, 0.08),
+                     (0.90, 0.92, 0.10, 0.08)],
+                    logo_paths.values()
+                ):
+                    try:
+                        img = mpimg.imread(path)
+                        ax_img = fig.add_axes(pos, zorder=10)
+                        ax_img.imshow(img)
+                        ax_img.axis("off")
+                    except Exception as e:
+                        print(f"Erreur logo {os.path.basename(path)} : {e}")
 
-                if chart_type == "Graphique linéaire par station":
-                    output_file = f"{site}_line.png"
-                else:
-                    output_file = f"{site}_bar.png"
-                output_path = os.path.join(self.save_folder, output_file)
-                plt.savefig(output_path, bbox_inches='tight')
+                # --- Sauvegarde ---
+                suffix = "line" if "linéaire" in chart_type.lower() else "bar"
+                out_name = f"{site}_{suffix}.png"
+                out_path = os.path.join(self.save_folder, out_name)
+                plt.savefig(out_path, bbox_inches="tight")
                 plt.close(fig)
-                saved_files.append(output_path)
+                saved_files.append(out_path)
+
             except Exception as e:
-                print(f"Erreur lors de la génération du graphique pour le site {site}: {e}")
+                print(f"[{site}] erreur graphique : {e}")
                 continue
 
+        # --- Message final ---
         if saved_files:
-            QMessageBox.information(self, "Succès",
-                                    f"Les graphiques ont été générés et sauvegardés dans :\n{self.save_folder}")
+            QMessageBox.information(
+                self, "Succès",
+                f"{len(saved_files)} graphiques générés dans :\n{self.save_folder}"
+            )
         else:
             QMessageBox.warning(self, "Erreur", "Aucun graphique n'a pu être généré.")
-
-
-# Pour utiliser mpimg
-import matplotlib.image as mpimg
-
-if __name__ == "__main__":
-    import sys
-    from PyQt5.QtWidgets import QApplication
-
-    app = QApplication(sys.argv)
-    from gui.app import MainWindow
-
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec_())
