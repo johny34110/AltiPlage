@@ -30,11 +30,11 @@ def load_stations_info():
             commune = row.get("Commune", "").strip()
             # Latitude / Longitude
             try:
-                lat = float(row.get("Latitude", "").strip())
+                lat = row.get("Latitude", "").strip().replace(",", ".")
             except (ValueError, TypeError):
                 lat = None
             try:
-                lon = float(row.get("Longitude", "").strip())
+                lon = row.get("Longitude", "").strip().replace(",", ".")
             except (ValueError, TypeError):
                 lon = None
 

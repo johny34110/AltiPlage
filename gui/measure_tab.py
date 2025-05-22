@@ -1,5 +1,3 @@
-# gui/measure_tab.py
-
 import os
 import pandas as pd
 from PyQt5.QtWidgets import (
@@ -23,6 +21,7 @@ class ImageViewer(QGraphicsView):
         self.selections = []
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setDragMode(QGraphicsView.NoDrag)
 
     def setImage(self, image_path):
         pixmap = QPixmap(image_path)
@@ -43,6 +42,14 @@ class ImageViewer(QGraphicsView):
         self.scale(factor, factor)
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.RightButton:
+            # Activate panning
+            self.setDragMode(QGraphicsView.ScrollHandDrag)
+            self._pan_start = event.pos()
+            super().mousePressEvent(event)
+            return
+
+        # Left-button selection
         if event.button() == Qt.LeftButton and len(self.selections) < 2:
             self.origin = self.mapToScene(event.pos())
             pen = QPen(Qt.red, 2) if len(self.selections) == 0 else QPen(Qt.blue, 2)
@@ -50,12 +57,21 @@ class ImageViewer(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self.dragMode() == QGraphicsView.ScrollHandDrag:
+            super().mouseMoveEvent(event)
+            return
         if self.current_rect_item:
             pos = self.mapToScene(event.pos())
             self.current_rect_item.setRect(QRectF(self.origin, pos).normalized())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        # Deactivate panning
+        if event.button() == Qt.RightButton:
+            self.setDragMode(QGraphicsView.NoDrag)
+            super().mouseReleaseEvent(event)
+            return
+
         if self.current_rect_item:
             rect = self.current_rect_item.rect()
             if rect.width() > 2 and rect.height() > 2:
@@ -85,6 +101,7 @@ class MeasureTab(QWidget):
         self.excel_file = None
         self.input_folder = None
         self.missing_photos = []
+        self.history = []
         self.current_photo = None
         self.current_photo_path = None
         self.calculated_value = None
@@ -92,7 +109,7 @@ class MeasureTab(QWidget):
         layout = QVBoxLayout(self)
         self.setLayout(layout)
 
-        # Rule height and remaining photos
+        # Top info: règle, restantes, photo
         top_info = QHBoxLayout()
         layout.addLayout(top_info)
         top_info.addWidget(QLabel("Hauteur règle (cm) :"))
@@ -105,6 +122,9 @@ class MeasureTab(QWidget):
         top_info.addWidget(QLabel("Photos restantes :"))
         self.remaining_label = QLabel("0")
         top_info.addWidget(self.remaining_label)
+        # Photo info
+        self.photo_info_label = QLabel("Photo: - (Site: -)")
+        top_info.addWidget(self.photo_info_label)
 
         # Photo controls
         btn_layout = QHBoxLayout()
@@ -112,6 +132,9 @@ class MeasureTab(QWidget):
         self.btn_list = QPushButton("Lister sans résultat")
         self.btn_list.clicked.connect(self.list_missing)
         btn_layout.addWidget(self.btn_list)
+        self.btn_prev = QPushButton("Précédente")
+        self.btn_prev.clicked.connect(self.load_prev_photo)
+        btn_layout.addWidget(self.btn_prev)
         self.btn_load = QPushButton("Charger suivante")
         self.btn_load.clicked.connect(self.load_next_photo)
         btn_layout.addWidget(self.btn_load)
@@ -147,6 +170,9 @@ class MeasureTab(QWidget):
         self.btn_save = QPushButton("Sauvegarder")
         self.btn_save.clicked.connect(self.save_current_result)
         ctrl.addWidget(self.btn_save)
+        self.btn_skip = QPushButton("Inexploitable")
+        self.btn_skip.clicked.connect(self.mark_unusable)
+        ctrl.addWidget(self.btn_skip)
 
         # Instruction label
         self.instruction_label = QLabel("Mode : tracez la règle (rouge)")
@@ -160,25 +186,31 @@ class MeasureTab(QWidget):
         if not self.excel_file:
             QMessageBox.warning(self, "Attention", "Aucun fichier Excel chargé.")
             return
-        xls = pd.ExcelFile(self.excel_file)
-        missing = []
-        for sheet in xls.sheet_names:
-            if sheet == 'Résumé':
-                continue
-            df = pd.read_excel(self.excel_file, sheet_name=sheet)
-            if 'Nom de la photo' not in df.columns or 'Résultat' not in df.columns:
-                continue
-            for idx, val in df['Résultat'].items():
-                if pd.isna(val) or str(val).strip() == '':
-                    missing.append((sheet, idx+2, df.at[idx, 'Nom de la photo']))
-        self.missing_photos = missing
-        self.remaining_label.setText(str(len(missing)))
-        QMessageBox.information(self, "Info", f"{len(missing)} photo(s) sans résultat.")
+        try:
+            xls = pd.ExcelFile(self.excel_file)
+            missing = []
+            for sheet in xls.sheet_names:
+                if sheet == 'Résumé':
+                    continue
+                df = pd.read_excel(self.excel_file, sheet_name=sheet)
+                if 'Nom de la photo' not in df.columns or 'Résultat' not in df.columns:
+                    continue
+                for idx, val in df['Résultat'].items():
+                    if pd.isna(val) or str(val).strip() == '':
+                        missing.append((sheet, idx+2, df.at[idx, 'Nom de la photo']))
+            self.missing_photos = missing
+            self.remaining_label.setText(str(len(missing)))
+            QMessageBox.information(self, "Info", f"{len(missing)} photo(s) sans résultat.")
+        except Exception as e:
+            QMessageBox.warning(self, "Erreur", f"Impossible de lire l'Excel : {e}")
 
     def load_next_photo(self):
         if not self.missing_photos:
             QMessageBox.information(self, "Info", "Aucune photo à charger.")
             return
+        # Push current to history
+        if self.current_photo:
+            self.history.append(self.current_photo)
         sheet, row, photo = self.missing_photos.pop(0)
         self.remaining_label.setText(str(len(self.missing_photos)))
         path = os.path.join(self.input_folder, sheet, photo)
@@ -191,6 +223,29 @@ class MeasureTab(QWidget):
             self.calculated_value = None
             self.measure_spin.setValue(0)
             self.instruction_label.setText("Mode : tracez la règle (rouge)")
+            self.photo_info_label.setText(f"Photo: {photo} (Site: {sheet})")
+        else:
+            QMessageBox.warning(self, "Erreur", f"Fichier absent : {path}")
+
+    def load_prev_photo(self):
+        if not self.history:
+            QMessageBox.information(self, "Info", "Aucune photo précédente.")
+            return
+        # Push current back to front of missing
+        if self.current_photo:
+            self.missing_photos.insert(0, self.current_photo)
+        sheet, row, photo = self.history.pop()
+        path = os.path.join(self.input_folder, sheet, photo)
+        if os.path.exists(path):
+            self.current_photo = (sheet, row, photo)
+            self.current_photo_path = path
+            self.image_viewer.setImage(path)
+            self.image_viewer.clearSelections()
+            self.calculated_value = None
+            self.measure_spin.setValue(0)
+            self.instruction_label.setText("Mode : tracez la règle (rouge)")
+            self.photo_info_label.setText(f"Photo: {photo} (Site: {sheet})")
+            self.remaining_label.setText(str(len(self.missing_photos)))
         else:
             QMessageBox.warning(self, "Erreur", f"Fichier absent : {path}")
 
@@ -205,7 +260,6 @@ class MeasureTab(QWidget):
             QMessageBox.warning(self, "Erreur", "Calcul impossible.")
             return
         self.calculated_value = result_cm
-        # Affiche la valeur calculée dans le spinbox pour modification manuelle
         self.measure_spin.setValue(round(result_cm, 2))
         self.instruction_label.setText("Ajustez la valeur puis cliquez sur Sauvegarder")
 
@@ -217,6 +271,16 @@ class MeasureTab(QWidget):
         to_save = self.measure_spin.value()
         update_excel_result(self.excel_file, sheet, row, to_save)
         QMessageBox.information(self, "Sauvegardé", f"Mesure enregistrée pour {photo}.")
+        self.load_next_photo()
+
+    def mark_unusable(self):
+        if not self.current_photo:
+            QMessageBox.warning(self, "Attention", "Aucune photo chargée.")
+            return
+        sheet, row, photo = self.current_photo
+        # Marquer comme inexploitable (ex: texte spécifique)
+        update_excel_result(self.excel_file, sheet, row, "INEXPLOITABLE")
+        QMessageBox.information(self, "Info", f"Photo {photo} marquée inexploitable.")
         self.load_next_photo()
 
     def open_current_photo(self):

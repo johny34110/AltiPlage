@@ -1,14 +1,17 @@
-# gui/result_tab.py
-
 import os
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QComboBox,
-    QFileDialog, QMessageBox
+    QFileDialog, QMessageBox, QGroupBox, QCheckBox, QHBoxLayout
 )
-from PyQt5.QtCore import Qt
+
+from functions.result_utilis import (
+    load_summary, load_station_data, load_ram_info
+)
 
 
 class ResultTab(QWidget):
@@ -20,30 +23,37 @@ class ResultTab(QWidget):
 
     def initUI(self):
         layout = QVBoxLayout(self)
-        self.setLayout(layout)
+        layout.addWidget(QLabel("Analyse générale des résultats"))
 
-        self.info_label = QLabel("Analyse générale des résultats")
-        layout.addWidget(self.info_label)
-
-        # Choix du dossier de sauvegarde
         self.btn_select_save = QPushButton("Sélectionner dossier de sauvegarde")
         self.btn_select_save.clicked.connect(self.select_save_folder)
         layout.addWidget(self.btn_select_save)
-
         self.save_folder_label = QLabel("Aucun dossier sélectionné")
         layout.addWidget(self.save_folder_label)
 
-        # Type de graphique
         self.chart_type_combo = QComboBox()
-        self.chart_type_combo.addItem("Graphique linéaire par station")
-        self.chart_type_combo.addItem("Graphique en barres par station")
+        self.chart_type_combo.addItems([
+            "Graphique linéaire par station",
+            "Graphique en barres par station"
+        ])
         layout.addWidget(self.chart_type_combo)
 
-        # Bouton de génération
+        grp_opts = QGroupBox("Options traces additionnelles")
+        hbox = QHBoxLayout()
+        self.cb_phma_ngf = QCheckBox("PHMA (m)")
+        self.cb_pmve_ngf = QCheckBox("PMVE (m)")
+        self.cb_pmme_ngf = QCheckBox("PMME (m)")
+        self.cb_nm_ngf   = QCheckBox("NM (m)")
+        self.cb_avg      = QCheckBox("Afficher moyenne")
+        for cb in (self.cb_phma_ngf, self.cb_pmve_ngf,
+                   self.cb_pmme_ngf, self.cb_nm_ngf, self.cb_avg):
+            hbox.addWidget(cb)
+        grp_opts.setLayout(hbox)
+        layout.addWidget(grp_opts)
+
         self.btn_generate = QPushButton("Générer graphiques")
         self.btn_generate.clicked.connect(self.generate_charts)
         layout.addWidget(self.btn_generate)
-
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
@@ -51,15 +61,12 @@ class ResultTab(QWidget):
         self.excel_file = excel_file
 
     def select_save_folder(self):
-        folder = QFileDialog.getExistingDirectory(
-            self, "Sélectionner le dossier de sauvegarde"
-        )
+        folder = QFileDialog.getExistingDirectory(self, "Sélectionner le dossier de sauvegarde")
         if folder:
             self.save_folder = folder
             self.save_folder_label.setText(folder)
 
     def generate_charts(self):
-        # Vérifications initiales
         if not self.excel_file:
             QMessageBox.warning(self, "Attention", "Aucun fichier Excel chargé.")
             return
@@ -67,153 +74,112 @@ class ResultTab(QWidget):
             QMessageBox.warning(self, "Attention", "Veuillez sélectionner un dossier de sauvegarde.")
             return
 
-        chart_type = self.chart_type_combo.currentText()
-
-        # 1) Lecture de la feuille "Résumé" pour récupérer Z_CC49
         try:
-            summary = pd.read_excel(
-                self.excel_file,
-                sheet_name="Résumé",
-                usecols=["Station", "Z_CC49"]
-            )
+            summary = load_summary(self.excel_file)
+            ram_info = load_ram_info()
+            xls = pd.ExcelFile(self.excel_file)
+            sheets = [s for s in xls.sheet_names if s != "Résumé"]
         except Exception as e:
-            QMessageBox.critical(self, "Erreur", f"Impossible de lire la feuille 'Résumé' :\n{e}")
+            QMessageBox.critical(self, "Erreur lecture", str(e))
             return
 
-        summary["Station"] = summary["Station"].astype(str).str.strip().str.upper()
-
-        # 2) Préparation des chemins de logos
-        logo_folder = os.path.join(os.getcwd(), "logo")
-        logo_paths = {
-            "altiplage": os.path.join(logo_folder, "Altipl5.png"),
-            "lamanche":  os.path.join(logo_folder, "lamanche.jpg"),
-            "cnam":      os.path.join(logo_folder, "cnam.png")
-        }
-
-        # 3) Parcours des feuilles (hors "Résumé")
-        xls = pd.ExcelFile(self.excel_file)
-        sheets = [s for s in xls.sheet_names if s != "Résumé"]
-        saved_files = []
-
+        saved = []
+        colors = {"PHMA (m)": "C2", "PMVE (m)": "C3", "PMME (m)": "C4", "NM (m)": "C5"}
         for site in sheets:
             try:
-                df = pd.read_excel(self.excel_file, sheet_name=site)
-
-                # Conversion de la date
-                if "Date / Heure" in df.columns:
-                    df["Date / Heure"] = pd.to_datetime(
-                        df["Date / Heure"],
-                        format="%d/%m/%Y %Hh%Mm%S",
-                        dayfirst=True,
-                        errors="coerce"
-                    )
-
-                # Conversion du résultat en numérique (cm)
-                if "Résultat" in df.columns:
-                    df["Résultat"] = pd.to_numeric(df["Résultat"], errors="coerce")
-
-                # Récupération de Z_CC49
+                df = load_station_data(self.excel_file, site)
                 code = site.strip().upper()
-                row = summary.loc[summary["Station"] == code, "Z_CC49"]
-                if not row.empty and pd.notna(row.iloc[0]):
-                    z_ref = float(row.iloc[0])
+
+                info = ram_info.get(code, {})
+                z_ref = info.get("Z_CC49")
+                site_name = site.strip()
+                if z_ref is None:
+                    row = summary[summary["Station"] == code]
+                    if not row.empty:
+                        z_ref = float(row["Z_CC49"].iloc[0])
+
+                if z_ref is not None and "Résultat" in df.columns:
                     df["Hauteur sable (m)"] = z_ref - df["Résultat"] / 100.0
                     plot_col = "Hauteur sable (m)"
-                    y_label = "Hauteur sable (m)"
-                    has_ref = True
+                    ylabel = "Hauteur sable (m)"
                 else:
                     plot_col = "Résultat"
-                    y_label = "Résultat (cm)"
-                    has_ref = False
-                    z_ref = None
+                    ylabel = "Résultat (cm)"
 
-                # Tri par date si possible
                 if "Date / Heure" in df.columns:
-                    try:
-                        df = df.sort_values("Date / Heure")
-                    except Exception:
-                        pass
+                    df = df.sort_values("Date / Heure")
+                mask = pd.notna(df.get("Date / Heure")) & pd.notna(df.get(plot_col))
+                df_plot = df.loc[mask]
+                dates = df_plot.get("Date / Heure")
+                y = df_plot.get(plot_col)
 
-                # --- Création du graphique ---
                 fig, ax = plt.subplots(figsize=(10, 6))
-                ax.set_title(f"Évolution sédimentaire – Site : {site}",
-                             pad=15, fontweight="bold")
+                ax.set_title(f"Observation hauteur sédimentaire - Station {site_name}", fontweight="bold")
 
-                if "Date / Heure" in df.columns and plot_col in df.columns:
-                    # Tracé des points
-                    if "linéaire" in chart_type.lower():
-                        ax.scatter(df["Date / Heure"], df[plot_col],
-                                   s=50, zorder=3)
-                        # droite de tendance entre premier et dernier
-                        if len(df) >= 2:
-                            x0, y0 = df["Date / Heure"].iloc[0], df[plot_col].iloc[0]
-                            x1, y1 = df["Date / Heure"].iloc[-1], df[plot_col].iloc[-1]
-                            ax.plot([x0, x1], [y0, y1],
-                                    linestyle="--", linewidth=1.5,
-                                    color="orange", label="Tendance extrêmes",
-                                    zorder=2)
-                        ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.6), frameon=False)
+                # Nuage de points plus petit
+                if "linéaire" in self.chart_type_combo.currentText().lower():
+                    ax.scatter(dates, y, s=20, color="C1", zorder=3, label=plot_col)
+                else:
+                    dates_str = dates.dt.strftime("%d/%m/%Y")
+                    ax.bar(dates_str, y, alpha=0.7, color="C1", zorder=2, label=plot_col)
 
-                    else:
-                        dates = df["Date / Heure"].dt.strftime("%d/%m/%Y")
-                        ax.bar(dates, df[plot_col],
-                               alpha=0.7, zorder=2)
+                # Poteau réf en noir
+                if z_ref is not None:
+                    ax.axhline(y=z_ref, linestyle='--', color="black", label="Poteau")
 
-                    ax.set_xlabel("Date")
-                    ax.set_ylabel(y_label)
-                    ax.tick_params(axis="x", rotation=45)
+                # Seuils NGF en couleurs distinctes
+                mapping = {
+                    self.cb_phma_ngf: ("PHMA (m NGF)", "PHMA (m)"),
+                    self.cb_pmve_ngf: ("PMVE (m NGF)", "PMVE (m)"),
+                    self.cb_pmme_ngf: ("PMME (m NGF)", "PMME (m)"),
+                    self.cb_nm_ngf:   ("NM (m NGF)",   "NM (m)")
+                }
+                for cb, (key_ngf, label_simple) in mapping.items():
+                    val = info.get(key_ngf)
+                    if cb.isChecked() and pd.notna(val):
+                        ax.axhline(y=val, linestyle=':', color=colors[label_simple], label=label_simple)
 
-                    # grille légère
-                    ax.grid(which="major", linestyle=":", alpha=0.5)
+                # Moyenne
+                if self.cb_avg.isChecked() and len(df_plot) > 0:
+                    m = y.mean()
+                    ax.axhline(y=m, linestyle='-.', color="C6", label=f"Moyenne {plot_col}")
 
-                    # axe Y de 0 à Z_CC49+1 si dispo
-                    if has_ref:
-                        ax.set_ylim(0, z_ref + 1)
-                    else:
-                        ax.set_ylim(bottom=0)
+                # Mise en forme et légende avec titre
+                ax.set_xlabel("Date")
+                ax.set_ylabel(ylabel)
+                ax.grid(which="major", linestyle=":", alpha=0.5)
+                legend = ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+                legend.set_title("Système de référence IGN69")
+                ax.tick_params(axis="x", rotation=45)
 
-                    # ligne de référence et légende à droite
-                    if has_ref:
-                        ax.axhline(
-                            y=z_ref,
-                            linestyle="--",
-                            label="Hauteur poteau réf. CC49",
-                            color="C1"
-                        )
-                        ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
-
-                # --- Ajout des logos ---
-                for pos, path in zip(
-                    [(0.02, 0.92, 0.10, 0.08),
-                     (0.78, 0.92, 0.10, 0.08),
-                     (0.90, 0.92, 0.10, 0.08)],
-                    logo_paths.values()
+                # Logos
+                logo_folder = os.path.join(os.getcwd(), "logo")
+                for pos, fname in zip(
+                    [(0.02, 0.92, 0.10, 0.08), (0.78, 0.92, 0.10, 0.08), (0.90, 0.92, 0.10, 0.08)],
+                    ["Altipl4.png", "lamanche.jpg", "cnam.png"]
                 ):
-                    try:
+                    path = os.path.join(logo_folder, fname)
+                    if os.path.exists(path):
                         img = mpimg.imread(path)
                         ax_img = fig.add_axes(pos, zorder=10)
                         ax_img.imshow(img)
                         ax_img.axis("off")
-                    except Exception as e:
-                        print(f"Erreur logo {os.path.basename(path)} : {e}")
 
-                # --- Sauvegarde ---
-                suffix = "line" if "linéaire" in chart_type.lower() else "bar"
-                out_name = f"{site}_{suffix}.png"
-                out_path = os.path.join(self.save_folder, out_name)
-                plt.savefig(out_path, bbox_inches="tight")
+                # Sauvegarde
+                suffix = "line" if "linéaire" in self.chart_type_combo.currentText().lower() else "bar"
+                out_path = os.path.join(self.save_folder, f"{site}_{suffix}.png")
+                fig.savefig(out_path, bbox_inches="tight")
                 plt.close(fig)
-                saved_files.append(out_path)
+                saved.append(out_path)
 
             except Exception as e:
-                print(f"[{site}] erreur graphique : {e}")
+                print(f"[{site}] Erreur : {e}")
                 continue
 
-        # --- Message final ---
-        if saved_files:
+        if saved:
             QMessageBox.information(
                 self, "Succès",
-                f"{len(saved_files)} graphiques générés dans :\n{self.save_folder}"
+                f"{len(saved)} graphiques générés dans :\n{self.save_folder}"
             )
         else:
             QMessageBox.warning(self, "Erreur", "Aucun graphique n'a pu être généré.")
